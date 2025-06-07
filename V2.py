@@ -250,35 +250,38 @@ live_monitor = LiveMonitor()
 
 async def response_handler(response):
     """Manejador global de respuestas para procesar peticiones GraphQL"""
-    if response.url.startswith("https://www.facebook.com/api/graphql/"):
-        print(f"\n[DEBUG] GraphQL detectado: {response.url}")
-        print(f"[DEBUG] Método: {response.request.method}")
-        print(f"[DEBUG] Es petición válida?: {response.request.method == 'POST' and response.ok}")
-        
-        if not response.ok:
-            live_monitor.update_request_stats()
-            return
+    try:
+        if "graphql" in response.url.lower():
+            print("\n" + "="*50)
+            print(f"[DEBUG] URL: {response.url}")
+            print(f"[DEBUG] Método: {response.request.method}")
+            print(f"[DEBUG] Status: {response.status}")
+            print(f"[DEBUG] Contenido: {str(response.request.post_data)[:50]}...")  # Mostrar solo los primeros 50 caracteres
             
-        try:
-            # Leer la respuesta una sola vez
-            json_data = await response.json()
-            json_preview = str(json_data)[:50] + "..."
-            print(f"[DEBUG] Inicio respuesta: {json_preview}")
-            
-            # Verificar si es una respuesta de anuncios válida
-            edges = json_data.get("data", {}).get("ad_library_main", {}).get("search_results_connection", {}).get("edges", [])
-            if edges:
-                print(f"[DEBUG] Cantidad de anuncios en esta petición: {len(edges)}")
-                # Obtener referencias globales y procesar anuncios
-                global ads_data, processed_ad_ids
-                live_monitor.update_request_stats(is_valid=True, ads_found=len(edges))
-                await handle_response(response, ads_data, processed_ad_ids, json_data)
-            else:
-                print("[DEBUG] No se encontraron anuncios en esta petición")
-                live_monitor.update_request_stats(is_valid=True)
-        except Exception as e:
-            print(f"[DEBUG] Error procesando respuesta: {repr(e)}")
-            live_monitor.update_request_stats()
+            if not response.ok:
+                print(f"[DEBUG] Respuesta no válida. Status: {response.status}")
+                live_monitor.update_request_stats()
+                return
+                
+            try:
+                json_data = await response.json()
+                print(f"[DEBUG] Contenido respuesta (primeros 100 chars): {str(json_data)[:100]}...")
+                
+                edges = json_data.get("data", {}).get("ad_library_main", {}).get("search_results_connection", {}).get("edges", [])
+                if edges:
+                    print(f"[DEBUG] ✅ Encontrados {len(edges)} anuncios en esta petición")
+                    global ads_data, processed_ad_ids
+                    live_monitor.update_request_stats(is_valid=True, ads_found=len(edges))
+                    await handle_response(response, ads_data, processed_ad_ids, json_data)
+                else:
+                    print("[DEBUG] ❌ No se encontraron anuncios en esta petición")
+                    live_monitor.update_request_stats(is_valid=True)
+            except Exception as e:
+                print(f"[DEBUG] ❌ Error procesando JSON de respuesta: {repr(e)}")
+                live_monitor.update_request_stats()
+    except Exception as e:
+        print(f"[DEBUG] ❌ Error general en response_handler: {repr(e)}")
+        live_monitor.increment_errors()
 
 async def handle_response(response, ads_data: dict, processed_ad_ids: set, json_data: dict):
     """Procesa una respuesta GraphQL que contiene anuncios"""
