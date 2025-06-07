@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Project-specific
+checkpoints/
+fb_ad_library_profile_v4/
+*.json
+*.pkl
+
+# Operating System
+.DS_Store
+Thumbs.db
