@@ -11,6 +11,17 @@ from pathlib import Path
 import sys
 from typing import Dict, Set
 
+# --- Configuración ---
+TARGET_URL = "https://web.facebook.com/ads/library/?active_status=active&ad_type=all&country=PE&media_type=video&q=paga%20en%20casa&search_type=keyword_unordered&start_date[min]=2025-05-22&start_date[max]=2025-06-06"
+OUTPUT_FILE = "meta_ads_data_v4.json"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+PERSISTENT_CONTEXT_DIR = "./fb_ad_library_profile_v4"
+MANUAL_SCROLL = True  # Cambiar a False para scroll automático
+MAX_SCROLLS = 5
+SCROLL_PAUSE_TIME = 10  # segundos entre scrolls en modo manual
+SAVE_INTERVAL = 20  # Guardar cada 20 anuncios nuevos
+BROWSER_HEADLESS = True
+
 class LiveMonitor:
     def __init__(self):
         self.start_time = time.time()
@@ -209,6 +220,7 @@ class StatsManager:
             f"Velocidad promedio: {avg_speed:.1f} anuncios/minuto",
             "\nTop 5 Anunciantes:",
         ]
+
         
         for advertiser, count in self.advertisers.most_common(5):
             summary.append(f"  - {advertiser}: {count} anuncios")
@@ -226,16 +238,6 @@ class StatsManager:
 # Variables globales para estadísticas
 stats_manager = StatsManager()
 
-# --- Configuración ---
-TARGET_URL = "https://web.facebook.com/ads/library/?active_status=active&ad_type=all&country=MX&media_type=video&q=paga%20en%20casa&search_type=keyword_unordered&start_date[min]=2025-05-22&start_date[max]=2025-06-06"
-OUTPUT_FILE = "meta_ads_data_v4.json"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-PERSISTENT_CONTEXT_DIR = "./fb_ad_library_profile_v4"
-MANUAL_SCROLL = True  # Cambiar a False para scroll automático
-MAX_SCROLLS = 5
-SCROLL_PAUSE_TIME = 10  # segundos entre scrolls en modo manual
-SAVE_INTERVAL = 20  # Guardar cada 20 anuncios nuevos
-BROWSER_HEADLESS = True
 
 if MANUAL_SCROLL:
     BROWSER_HEADLESS = False
