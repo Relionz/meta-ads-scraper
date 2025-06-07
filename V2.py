@@ -10,6 +10,12 @@ import pickle
 from pathlib import Path
 import sys
 from typing import Dict, Set
+import logging
+import argparse
+import shutil
+
+# Can be overridden by command-line argument
+CLEAR_PROFILE_ON_START = False
 
 class LiveMonitor:
     def __init__(self):
@@ -126,9 +132,9 @@ class CheckpointManager:
             with open(temp_file, 'wb') as f:
                 pickle.dump(state_data, f)
             temp_file.replace(self.checkpoint_file)
-            print(f"[CHECKPOINT] Estado guardado: {len(state_data['ads_data'])} anuncios")
+            logging.info(f"Estado guardado: {len(state_data['ads_data'])} anuncios")
         except Exception as e:
-            print(f"[CHECKPOINT] Error guardando estado: {repr(e)}")
+            logging.exception(f"Error saving checkpoint: {e}") # Use .exception
     
     async def load_checkpoint(self) -> dict:
         """Carga el último checkpoint guardado"""
@@ -136,10 +142,10 @@ class CheckpointManager:
             if self.checkpoint_file.exists():
                 with open(self.checkpoint_file, 'rb') as f:
                     state = pickle.load(f)
-                print(f"[CHECKPOINT] Estado recuperado: {len(state['ads_data'])} anuncios")
+                logging.info(f"Estado recuperado: {len(state['ads_data'])} anuncios")
                 return state
         except Exception as e:
-            print(f"[CHECKPOINT] Error cargando estado: {repr(e)}")
+            logging.exception(f"Error loading checkpoint: {e}") # Use .exception
         return {'ads_data': {}, 'processed_ad_ids': set(), 'last_scroll': 0}
     
     def should_retry(self, error) -> bool:
@@ -157,7 +163,7 @@ class CheckpointManager:
         
         if isinstance(error, retry_errors):
             self.retry_count += 1
-            print(f"[CHECKPOINT] Reintento {self.retry_count}/{self.max_retries} después de error: {repr(error)}")
+            logging.warning(f"Reintento {self.retry_count}/{self.max_retries} después de error: {repr(error)}")
             return True
         return False
     
@@ -165,7 +171,7 @@ class CheckpointManager:
         """Maneja errores guardando el estado y determinando si reintentar"""
         await self.save_checkpoint(state_data)
         if self.should_retry(error):
-            print(f"[CHECKPOINT] Esperando {self.retry_delay}s antes de reintentar...")
+            logging.info(f"Esperando {self.retry_delay}s antes de reintentar...")
             await asyncio.sleep(self.retry_delay)
             return True
         return False
@@ -231,14 +237,16 @@ TARGET_URL = "https://web.facebook.com/ads/library/?active_status=active&ad_type
 OUTPUT_FILE = "meta_ads_data_v4.json"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 PERSISTENT_CONTEXT_DIR = "./fb_ad_library_profile_v4"
-MANUAL_SCROLL = True  # Cambiar a False para scroll automático
-MAX_SCROLLS = 5
+MANUAL_SCROLL = False  # Cambiar a False para scroll automático
+MAX_SCROLLS = 2 # Temporarily set to 2 for testing
 SCROLL_PAUSE_TIME = 10  # segundos entre scrolls en modo manual
 SAVE_INTERVAL = 20  # Guardar cada 20 anuncios nuevos
 BROWSER_HEADLESS = True
 
 if MANUAL_SCROLL:
     BROWSER_HEADLESS = False
+else: # Ensure headless is true if manual scroll is false
+    BROWSER_HEADLESS = True
 
 # Variables globales
 last_save_count = 0
@@ -251,34 +259,51 @@ live_monitor = LiveMonitor()
 async def response_handler(response):
     """Manejador global de respuestas para procesar peticiones GraphQL"""
     if response.url.startswith("https://www.facebook.com/api/graphql/"):
-        print(f"\n[DEBUG] GraphQL detectado: {response.url}")
-        print(f"[DEBUG] Método: {response.request.method}")
-        print(f"[DEBUG] Es petición válida?: {response.request.method == 'POST' and response.ok}")
+        logging.debug(f"GraphQL detectado: {response.url}")
+        logging.debug(f"Método: {response.request.method}")
+        logging.debug(f"Es petición válida?: {response.request.method == 'POST' and response.ok}")
         
         if not response.ok:
+            # Log the full response URL if response.ok is false
+            logging.warning(f"Respuesta no OK para {response.url}. Estado: {response.status}")
             live_monitor.update_request_stats()
             return
             
         try:
             # Leer la respuesta una sola vez
             json_data = await response.json()
-            json_preview = str(json_data)[:50] + "..."
-            print(f"[DEBUG] Inicio respuesta: {json_preview}")
-            
-            # Verificar si es una respuesta de anuncios válida
+            # Ensure pretty printing for better readability if it's a complex object
+            json_preview = json.dumps(json_data, indent=2, ensure_ascii=False)[:1000] # Log more for inspection
+            logging.debug(f"GraphQL response content preview: {json_preview}...") # Keep as debug, can be verbose
+
             edges = json_data.get("data", {}).get("ad_library_main", {}).get("search_results_connection", {}).get("edges", [])
             if edges:
-                print(f"[DEBUG] Cantidad de anuncios en esta petición: {len(edges)}")
+                logging.info(f"Found {len(edges)} ad edges in GraphQL response.")
                 # Obtener referencias globales y procesar anuncios
                 global ads_data, processed_ad_ids
                 live_monitor.update_request_stats(is_valid=True, ads_found=len(edges))
                 await handle_response(response, ads_data, processed_ad_ids, json_data)
             else:
-                print("[DEBUG] No se encontraron anuncios en esta petición")
-                live_monitor.update_request_stats(is_valid=True)
+                logging.info("No 'edges' found in GraphQL response. Full data structure might have changed or it's not an ad-related response.")
+                # Consider logging more details from json_data if edges are consistently missing
+                if "data" in json_data and "ad_library_main" not in json_data["data"]:
+                    logging.debug(f"GraphQL 'data' field does not contain 'ad_library_main'. Keys: {list(json_data['data'].keys())}")
+                elif "data" in json_data and "search_results_connection" not in json_data["data"].get("ad_library_main", {}):
+                    logging.debug(f"GraphQL 'ad_library_main' does not contain 'search_results_connection'. Keys: {list(json_data['data'].get('ad_library_main', {}).keys())}")
+                live_monitor.update_request_stats(is_valid=True) # Still a valid response, just no ads
+        except json.JSONDecodeError:
+            logging.error(f"Failed to decode JSON from GraphQL response: {response.url}")
+            try:
+                responseText = await response.text()
+                logging.debug(f"Response text (first 500 chars): {responseText[:500]}")
+            except Exception as e_text:
+                logging.error(f"Failed to get text from response after JSON decode error: {e_text}")
+            live_monitor.update_request_stats() # Count as an error / invalid request attempt
+            return # Cannot proceed if JSON is invalid
         except Exception as e:
-            print(f"[DEBUG] Error procesando respuesta: {repr(e)}")
-            live_monitor.update_request_stats()
+            logging.exception(f"Error processing GraphQL response: {response.url}") # Use .exception for stack trace
+            live_monitor.update_request_stats() # Ensure this is called on error
+            return # Return if there was an error processing the response
 
 async def handle_response(response, ads_data: dict, processed_ad_ids: set, json_data: dict):
     """Procesa una respuesta GraphQL que contiene anuncios"""
@@ -291,128 +316,154 @@ async def handle_response(response, ads_data: dict, processed_ad_ids: set, json_
         if not edges:
             return
             
-        print(f"[DEBUG] Procesando {len(edges)} edges")
+        logging.debug(f"Procesando {len(edges)} edges")
         
         # 3. Procesar cada edge
         new_ads_count_in_batch = 0
         for edge in edges:
+            ad_id_for_error_log = "UNKNOWN_AD_ID" # Default if ad_id cannot be retrieved
+            snapshot = {} # Initialize snapshot and collated for error logging scope
+            collated = {}
             try:
                 node = edge.get("node", {})
                 if not node:
+                    logging.debug("Edge sin nodo, saltando.")
                     continue
 
                 collated_results = node.get("collated_results", [])
                 if not collated_results:
+                    logging.debug("Nodo sin collated_results, saltando.")
                     continue
                 
                 collated = collated_results[0] # Asumimos el primer resultado
                 snapshot = collated.get("snapshot", {})
                 if not snapshot:
+                    logging.debug("Collated result sin snapshot, saltando.")
                     continue
                 
                 ad_id = collated.get("ad_archive_id")
-                if not ad_id:
-                    continue 
-                if ad_id in processed_ad_ids:
+                if ad_id:
+                    ad_id_for_error_log = ad_id
+                else: # No ad_id, definitely skip
+                    logging.debug("Collated result sin ad_archive_id, saltando.")
                     continue
 
-                processed_ad_ids.add(ad_id)
-                new_ads_count_in_batch +=1
+                # Log the ad_id being processed
+                logging.debug(f"Procesando ad_id: {ad_id}")
 
-                # --- Extracción de datos con manejo seguro de caracteres especiales ---
-                def safe_get(obj, key, default=""):
-                    try:
-                        value = obj.get(key, default)
-                        if isinstance(value, str):
-                            # Eliminar emojis y caracteres especiales problemáticos
-                            return value.encode('ascii', 'ignore').decode('ascii')
-                        return value
-                    except:
-                        return default
+                if ad_id in processed_ad_ids:
+                    # Log if an ad_id is skipped
+                    logging.debug(f"Ad_id {ad_id} ya procesado, saltando.")
+                    continue
 
-                page_name = safe_get(snapshot, "page_name")
-                page_like_count = snapshot.get("page_like_count")
-                is_active_status = collated.get("is_active")
-                total_active_time_value = collated.get("total_active_time")
-                publisher_platforms = collated.get("publisher_platform", [])
-                start_date_ts = collated.get("start_date")
-                page_profile_uri = safe_get(snapshot, "page_profile_uri")
-                page_profile_picture_url = safe_get(snapshot, "page_profile_picture_url")
-                
-                body_data = snapshot.get("body", {})
-                primary_caption = safe_get(body_data, "text") if isinstance(body_data, dict) else None
-                secondary_caption = safe_get(snapshot, "link_description") or safe_get(snapshot, "caption")
-                
-                thumbnail_url = ""
-                videos_list = snapshot.get("videos", [])
-                images_list = snapshot.get("images", [])
-                video_hd_url = ""
-                video_sd_url = ""
-                
-                if videos_list and isinstance(videos_list, list) and videos_list:
-                    first_video = videos_list[0]
-                    if isinstance(first_video, dict):
-                        thumbnail_url = safe_get(first_video, "video_preview_image_url")
-                        video_hd_url = safe_get(first_video, "video_hd_url")
-                        video_sd_url = safe_get(first_video, "video_sd_url")
-                
-                image_url_main = ""
-                if images_list and isinstance(images_list, list) and images_list:
-                    first_image = images_list[0]
-                    if isinstance(first_image, dict):
-                        image_url_main = safe_get(first_image, "resized_image_url") or safe_get(first_image, "original_image_url")
-                        if not thumbnail_url: thumbnail_url = image_url_main
-                
-                display_format = safe_get(snapshot, "display_format")
-                cta_text = safe_get(snapshot, "cta_text")
-                cta_type = safe_get(snapshot, "cta_type")
-                raw_cta_link = safe_get(snapshot, "link_url", "")
-                cleaned_cta_link = clean_facebook_redirect_url(raw_cta_link)
+                # --- Start of critical extraction block ---
+                try:
+                    processed_ad_ids.add(ad_id) # Add to processed only if we attempt full extraction
+                    new_ads_count_in_batch +=1
 
-                ad_info = {
-                    "ID Anuncio (Library ID)": ad_id,
-                    "Nombre Anunciante": page_name,
-                    "Page Like Count": page_like_count,
-                    "Is Active": is_active_status,
-                    "Total Active Time": total_active_time_value,
-                    "URL Perfil Anunciante": page_profile_uri,
-                    "Foto Perfil Anunciante": page_profile_picture_url,
-                    "Thumbnail Anuncio": thumbnail_url,
-                    "Caption Principal": primary_caption,
-                    "Caption Secundario": secondary_caption,
-                    "URL Video HD": video_hd_url,
-                    "URL Video SD": video_sd_url,
-                    "URL Imagen (para anuncios de imagen)": image_url_main,
-                    "Formato Anuncio": display_format,
-                    "Fecha Inicio (timestamp)": start_date_ts,
-                    "Texto CTA": cta_text,
-                    "Tipo CTA": cta_type,
-                    "URL Destino CTA (limpia)": cleaned_cta_link,
-                    "Plataformas": publisher_platforms
-                }
-                
-                # Actualizar estadísticas
-                stats_manager.update_stats(ad_info)
-                
-                print(f"[DEBUG] Anuncio procesado: {ad_id}")
-                ads_data[ad_id] = ad_info
+                    # --- Extracción de datos con manejo seguro de caracteres especiales ---
+                    def safe_get(obj, key, default=""): # Keep safe_get for individual field robustness
+                        try:
+                            value = obj.get(key, default)
+                            if isinstance(value, str):
+                                return value.encode('ascii', 'ignore').decode('ascii')
+                            return value
+                        except:
+                            return default
+
+                    page_name = safe_get(snapshot, "page_name")
+                    page_like_count = snapshot.get("page_like_count")
+                    is_active_status = collated.get("is_active")
+                    total_active_time_value = collated.get("total_active_time")
+                    publisher_platforms = collated.get("publisher_platform", [])
+                    start_date_ts = collated.get("start_date")
+                    page_profile_uri = safe_get(snapshot, "page_profile_uri")
+                    page_profile_picture_url = safe_get(snapshot, "page_profile_picture_url")
+
+                    body_data = snapshot.get("body", {})
+                    primary_caption = safe_get(body_data, "text") if isinstance(body_data, dict) else None
+                    secondary_caption = safe_get(snapshot, "link_description") or safe_get(snapshot, "caption")
+
+                    thumbnail_url = ""
+                    videos_list = snapshot.get("videos", [])
+                    images_list = snapshot.get("images", [])
+                    video_hd_url = ""
+                    video_sd_url = ""
+
+                    if videos_list and isinstance(videos_list, list) and videos_list:
+                        first_video = videos_list[0]
+                        if isinstance(first_video, dict):
+                            thumbnail_url = safe_get(first_video, "video_preview_image_url")
+                            video_hd_url = safe_get(first_video, "video_hd_url")
+                            video_sd_url = safe_get(first_video, "video_sd_url")
+
+                    image_url_main = ""
+                    if images_list and isinstance(images_list, list) and images_list:
+                        first_image = images_list[0]
+                        if isinstance(first_image, dict):
+                            image_url_main = safe_get(first_image, "resized_image_url") or safe_get(first_image, "original_image_url")
+                            if not thumbnail_url: thumbnail_url = image_url_main
+
+                    display_format = safe_get(snapshot, "display_format")
+                    cta_text = safe_get(snapshot, "cta_text")
+                    cta_type = safe_get(snapshot, "cta_type")
+                    raw_cta_link = safe_get(snapshot, "link_url", "")
+                    cleaned_cta_link = clean_facebook_redirect_url(raw_cta_link)
+
+                    ad_info = {
+                        "ID Anuncio (Library ID)": ad_id,
+                        "Nombre Anunciante": page_name,
+                        "Page Like Count": page_like_count,
+                        "Is Active": is_active_status,
+                        "Total Active Time": total_active_time_value,
+                        "URL Perfil Anunciante": page_profile_uri,
+                        "Foto Perfil Anunciante": page_profile_picture_url,
+                        "Thumbnail Anuncio": thumbnail_url,
+                        "Caption Principal": primary_caption,
+                        "Caption Secundario": secondary_caption,
+                        "URL Video HD": video_hd_url,
+                        "URL Video SD": video_sd_url,
+                        "URL Imagen (para anuncios de imagen)": image_url_main,
+                        "Formato Anuncio": display_format,
+                        "Fecha Inicio (timestamp)": start_date_ts,
+                        "Texto CTA": cta_text,
+                        "Tipo CTA": cta_type,
+                        "URL Destino CTA (limpia)": cleaned_cta_link,
+                        "Plataformas": publisher_platforms
+                    }
+
+                    stats_manager.update_stats(ad_info)
+                    logging.debug(f"Ad processed successfully: {ad_id}")
+                    ads_data[ad_id] = ad_info
+
+                except (KeyError, TypeError, AttributeError) as e_extract:
+                    logging.error(f"Extraction error for ad_id '{ad_id_for_error_log}': {type(e_extract).__name__}: {e_extract}. Problematic snapshot/collated data snippet below.")
+                    logging.debug(f"Snapshot data for ad_id '{ad_id_for_error_log}': {str(snapshot)[:500]}...")
+                    logging.debug(f"Collated data for ad_id '{ad_id_for_error_log}': {str(collated)[:500]}...")
+                    live_monitor.increment_errors() # Ensure error is counted
+                    # new_ads_count_in_batch was incremented, but this ad failed.
+                    # It's simpler to potentially misreport slightly on batch count in monitor
+                    # than to decrement here or manage complex state.
+                    # The processed_ad_ids.add was also done, which is fine, it means we won't retry this problematic ad.
+                    continue # Continue to the next edge
+                # --- End of critical extraction block ---
                 
                 # Guardar incrementalmente
                 if len(ads_data) - last_save_count >= SAVE_INTERVAL:
                     await save_data(ads_data)
                     last_save_count = len(ads_data)
-                    
-            except Exception as e:
-                print(f"[DEBUG] Error procesando anuncio: {repr(e)}")
+
+            except Exception as e_outer: # Catch any other unexpected error for an edge
+                logging.exception(f"Outer error processing edge for ad_id '{ad_id_for_error_log}': {e_outer}")
                 live_monitor.increment_errors()
-                continue
+                continue # Continue to the next edge
         
-        if new_ads_count_in_batch > 0:
+        if new_ads_count_in_batch > 0: # This count might be slightly off if errors occurred mid-batch
             live_monitor.update_request_stats(ads_processed=new_ads_count_in_batch)
             live_monitor.update_progress(ads_data)
 
-    except Exception as ex:
-        print(f"ERROR_HANDLER ({response.url}): {repr(ex)}")
+    except Exception as ex: # This is for errors in the overall edge processing setup, not individual ads
+        logging.exception(f"Critical error in handle_response structure for URL {response.url}: {ex}")
         live_monitor.increment_errors()
 
 async def save_data(ads_data: dict):
@@ -421,9 +472,9 @@ async def save_data(ads_data: dict):
         with open(temp_file, 'w', encoding='utf-8', errors='ignore') as f:
             json.dump(list(ads_data.values()), f, ensure_ascii=False, indent=4)
         os.replace(temp_file, OUTPUT_FILE)
-        print(f"[{time.strftime('%H:%M:%S')}] Guardados {len(ads_data)} anuncios en {OUTPUT_FILE}")
+        logging.info(f"Guardados {len(ads_data)} anuncios en {OUTPUT_FILE}")
     except Exception as e:
-        print(f"ERROR: No se pudieron guardar los datos: {repr(e)}")
+        logging.exception(f"Failed to save data to {OUTPUT_FILE}: {e}")
 
 # --- Funciones Auxiliares ---
 def clean_facebook_redirect_url(url: str) -> str:
@@ -437,8 +488,38 @@ def clean_facebook_redirect_url(url: str) -> str:
 
 # --- Función Principal ---
 async def main():
-    global start_time, ads_data, processed_ad_ids, last_save_count
+    global start_time, ads_data, processed_ad_ids, last_save_count, PERSISTENT_CONTEXT_DIR
     start_time = time.time()
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    logging.info(f"Target URL for scraping: {TARGET_URL}")
+
+    parser = argparse.ArgumentParser(description="Scrape Facebook Ads Library.")
+    parser.add_argument(
+        "--clear-profile",
+        action="store_true",
+        help="Clear the persistent browser profile directory before starting."
+    )
+    args = parser.parse_args()
+
+    if args.clear_profile:
+        if os.path.exists(PERSISTENT_CONTEXT_DIR):
+            logging.info(f"Command-line argument --clear-profile received. Deleting directory: {PERSISTENT_CONTEXT_DIR}")
+            try:
+                shutil.rmtree(PERSISTENT_CONTEXT_DIR)
+                logging.info(f"Successfully deleted directory: {PERSISTENT_CONTEXT_DIR}")
+                # Recreate the directory after deletion as Playwright expects it to exist
+                os.makedirs(PERSISTENT_CONTEXT_DIR, exist_ok=True)
+            except Exception as e:
+                logging.exception(f"Failed to delete directory {PERSISTENT_CONTEXT_DIR}. Please clear it manually if issues persist.")
+        else:
+            logging.info(f"--clear-profile specified, but directory {PERSISTENT_CONTEXT_DIR} does not exist. Proceeding.")
     
     # Intentar cargar desde checkpoint
     state = await checkpoint_manager.load_checkpoint()
@@ -460,9 +541,9 @@ async def main():
                     if ad_id and ad_id not in processed_ad_ids:
                         ads_data[ad_id] = ad
                         processed_ad_ids.add(ad_id)
-            print(f"INFO: Cargados {len(ads_data)} anuncios existentes de {OUTPUT_FILE}")
+            logging.info(f"Cargados {len(ads_data)} anuncios existentes de {OUTPUT_FILE}")
         except Exception as e:
-            print(f"WARN: Error cargando datos existentes: {e}")
+            logging.warning(f"Error cargando datos existentes: {e}")
             live_monitor.increment_errors()
 
     if not os.path.exists(PERSISTENT_CONTEXT_DIR):
@@ -471,7 +552,7 @@ async def main():
     while True:  # Loop principal para reintentos
         try:
             async with async_playwright() as p:
-                print(f"INFO: Lanzando navegador con perfil: {PERSISTENT_CONTEXT_DIR}")
+                logging.info(f"Lanzando navegador con perfil: {PERSISTENT_CONTEXT_DIR}")
                 context = await p.firefox.launch_persistent_context(
                     PERSISTENT_CONTEXT_DIR, 
                     headless=BROWSER_HEADLESS, 
@@ -485,12 +566,12 @@ async def main():
                 # Configurar el manejador de respuestas antes de navegar
                 page.on("response", lambda response: asyncio.create_task(response_handler(response)))
                 
-                print(f"INFO: Navegando a: {TARGET_URL}")
+                logging.info(f"Navegando a: {TARGET_URL}")
                 try:
                     await page.goto(TARGET_URL, wait_until="networkidle", timeout=90000)
-                    print("INFO: Página principal cargada.")
+                    logging.info("Página principal cargada.")
                 except Exception as e:
-                    print(f"ERROR: Navegando a la página: {e}")
+                    logging.error(f"Navegando a la página: {e}")
                     live_monitor.increment_errors()
                     if not await checkpoint_manager.handle_error(e, {
                         'ads_data': ads_data,
@@ -502,26 +583,36 @@ async def main():
                     continue
 
                 # Manejar cookies si es necesario
+                logging.info("Attempting to find cookie consent button with selectors: 'button:has-text(\"Permitir todas las cookies\")' or 'button:has-text(\"Allow all cookies\")'")
                 try:
-                    btn_cookies = page.locator('button:has-text("Permitir todas las cookies"), button:has-text("Allow all cookies")').first
+                    cookie_selector = 'button:has-text("Permitir todas las cookies"), button:has-text("Allow all cookies")'
+                    logging.info(f"Looking for cookie button with selector: {cookie_selector}")
+                    btn_cookies = page.locator(cookie_selector).first
                     if await btn_cookies.is_visible(timeout=7000):
+                        logging.info("Cookie consent button found and visible. Attempting to click.")
                         await btn_cookies.click(timeout=5000)
-                        print("INFO: Cookies aceptadas.")
-                        await page.wait_for_timeout(2000)
-                except:
-                    print("INFO: Banner de cookies no encontrado o no clickeado.")
+                        logging.info("Cookie consent button clicked.")
+                        await page.wait_for_timeout(2000) # Wait for any overlays to disappear
+                    else:
+                        logging.info("Cookie consent button not found or not visible within timeout.")
+                except PlaywrightTimeoutError:
+                    logging.warning("Timeout while trying to find or click the cookie consent button.")
+                except Exception as e:
+                    logging.warning(f"Could not click cookie consent button: {e}")
 
                 # Iniciar proceso de scroll
-                print("INFO: Iniciando proceso de scroll...")
+                logging.info("Iniciando proceso de scroll...")
                 initial_ad_count = len(ads_data)
                 scroll_count = last_scroll  # Comenzar desde el último scroll guardado
 
                 if MANUAL_SCROLL:
-                    print(f"INFO: Iniciando scroll manual infinito cada {SCROLL_PAUSE_TIME}s...")
+                    logging.info(f"Iniciando scroll manual infinito cada {SCROLL_PAUSE_TIME}s...")
                     prev_ads_count = len(ads_data)
                     no_new_scrolls = 0
                     threshold = 3
                     while True:
+                        ads_before_scroll = len(ads_data)
+                        logging.info(f"Manual scroll {scroll_count + 1}: Ads count before scroll: {ads_before_scroll}")
                         # mostrar progreso actual
                         live_monitor.update_progress(ads_data, scroll_count)
                         # cuenta regresiva antes del siguiente scroll
@@ -540,25 +631,31 @@ async def main():
                             'processed_ad_ids': processed_ad_ids,
                             'last_scroll': scroll_count
                         })
+                        logging.debug(f"Scroll {scroll_count} realizado. Esperando {SCROLL_PAUSE_TIME}s para carga de anuncios.")
                         # espera para procesar posibles respuestas
-                        await asyncio.sleep(SCROLL_PAUSE_TIME)
-                        current_ads_count = len(ads_data)
-                        if current_ads_count > prev_ads_count:
-                            prev_ads_count = current_ads_count
+                        await asyncio.sleep(SCROLL_PAUSE_TIME) # Short wait for ads to load after scroll
+                        ads_after_scroll = len(ads_data)
+                        logging.info(f"Manual scroll {scroll_count}: Ads count after scroll and processing: {ads_after_scroll}. New ads from this scroll: {ads_after_scroll - ads_before_scroll}")
+                        if ads_after_scroll > prev_ads_count: # Use ads_after_scroll for comparison
+                            prev_ads_count = ads_after_scroll
                             no_new_scrolls = 0
                         else:
                             no_new_scrolls += 1
                         if no_new_scrolls >= threshold:
-                            print(f"\nINFO: No se encontraron anuncios nuevos tras {threshold} scrolls. Finalizando scroll manual.")
+                            logging.info(f"No se encontraron anuncios nuevos tras {threshold} scrolls. Finalizando scroll manual.")
                             break
-                    print(f"\nINFO: Scroll manual infinito finalizado después de {scroll_count} scrolls.")
+                    logging.info(f"Scroll manual infinito finalizado después de {scroll_count} scrolls.")
                 else:
-                    print(f"INFO: Iniciando scroll automático (hasta {MAX_SCROLLS} intentos)...")
+                    logging.info(f"Iniciando scroll automático (hasta {MAX_SCROLLS} intentos)...")
                     for i in range(scroll_count, MAX_SCROLLS):
+                        ads_before_scroll = len(ads_data)
+                        # Use (i + 1) for 1-based scroll attempt logging if scroll_count starts at 0
+                        logging.info(f"Automatic scroll attempt {i + 1}/{MAX_SCROLLS}: Ads count before scroll: {ads_before_scroll}")
                         try:
                             await page.evaluate("window.scrollBy(0, window.innerHeight * 0.9)")
                             scroll_count += 1
                             live_monitor.update_progress(ads_data, scroll_count)
+                            logging.debug(f"Scroll {scroll_count} realizado. Esperando {SCROLL_PAUSE_TIME}s para carga de anuncios.")
                             
                             if scroll_count % 5 == 0 or scroll_count == MAX_SCROLLS:
                                 # Guardar checkpoint cada 5 scrolls
@@ -567,8 +664,12 @@ async def main():
                                     'processed_ad_ids': processed_ad_ids,
                                     'last_scroll': scroll_count
                                 })
-                            await asyncio.sleep(SCROLL_PAUSE_TIME)
+                            await asyncio.sleep(SCROLL_PAUSE_TIME) # Short wait for ads to load
+                            ads_after_scroll = len(ads_data)
+                            # scroll_count is incremented after evaluate, so it's current for this log
+                            logging.info(f"Automatic scroll attempt {scroll_count}/{MAX_SCROLLS}: Ads count after scroll and processing: {ads_after_scroll}. New ads from this scroll: {ads_after_scroll - ads_before_scroll}")
                         except Exception as e:
+                            logging.exception(f"Error durante el scroll automático #{i + 1}:")
                             live_monitor.increment_errors()
                             if not await checkpoint_manager.handle_error(e, {
                                 'ads_data': ads_data,
@@ -577,33 +678,35 @@ async def main():
                             }):
                                 raise
                 
-                print(f"\nINFO: Scroll finalizado después de {scroll_count} scrolls.")
+                logging.info(f"Scroll finalizado después de {scroll_count} scrolls.")
                 new_ads_after_scroll = len(ads_data) - initial_ad_count
                 if new_ads_after_scroll > 0:
-                    print(f"INFO: Se encontraron {new_ads_after_scroll} anuncios adicionales durante el scroll.")
+                    logging.info(f"Se encontraron {new_ads_after_scroll} anuncios adicionales durante el scroll.")
                 
-                print("INFO: Esperando 5s para procesar peticiones finales...")
+                logging.info("Esperando 5s para procesar peticiones finales...")
                 await asyncio.sleep(5)
                 
-                print(f"INFO: Cerrando navegador. Total anuncios únicos: {len(ads_data)}")
+                logging.info(f"Cerrando navegador. Total anuncios únicos: {len(ads_data)}")
                 await context.close()
                 break  # Salir del loop de reintentos si todo fue exitoso
                 
         except Exception as e:
+            logging.exception("Excepción en el loop principal:")
             live_monitor.increment_errors()
             if not await checkpoint_manager.handle_error(e, {
                 'ads_data': ads_data,
                 'processed_ad_ids': processed_ad_ids,
                 'last_scroll': scroll_count if 'scroll_count' in locals() else 0
             }):
-                print(f"ERROR FATAL: {repr(e)}")
+                logging.exception(f"FATAL ERROR in main execution after failing retry attempts: {e}")
                 break
     
     if ads_data:
         await save_data(ads_data)
-        print("\n" + stats_manager.get_summary())  # Agregar línea en blanco para separar del monitor
+        # The StatsManager.get_summary() uses print for a final report, which is acceptable.
+        print("\n" + stats_manager.get_summary())
     else:
-        print("WARN: No se recopilaron datos de anuncios.")
+        logging.warning("No se recopilaron datos de anuncios.")
 
 if __name__ == "__main__":
     asyncio.run(main())
