@@ -227,15 +227,15 @@ class StatsManager:
 stats_manager = StatsManager()
 
 # --- Configuración ---
-TARGET_URL = "https://web.facebook.com/ads/library/?active_status=active&ad_type=all&country=MX&media_type=video&q=paga%20en%20casa&search_type=keyword_unordered&start_date[min]=2025-05-22&start_date[max]=2025-06-06"
+TARGET_URL = "https://web.facebook.com/ads/library/?active_status=active&ad_type=all&country=GB&media_type=video&q=free%20shipping&search_type=keyword_unordered&start_date[min]=2025-05-08&start_date[max]=2025-06-07"
 OUTPUT_FILE = "meta_ads_data_v4.json"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 PERSISTENT_CONTEXT_DIR = "./fb_ad_library_profile_v4"
-MANUAL_SCROLL = True  # Cambiar a False para scroll automático
-MAX_SCROLLS = 5
+MANUAL_SCROLL = False  # Cambiar a False para scroll automático
+MAX_SCROLLS = 50000
 SCROLL_PAUSE_TIME = 10  # segundos entre scrolls en modo manual
 SAVE_INTERVAL = 20  # Guardar cada 20 anuncios nuevos
-BROWSER_HEADLESS = True
+BROWSER_HEADLESS = False
 
 if MANUAL_SCROLL:
     BROWSER_HEADLESS = False
@@ -250,7 +250,7 @@ live_monitor = LiveMonitor()
 
 async def response_handler(response):
     """Manejador global de respuestas para procesar peticiones GraphQL"""
-    if response.url.startswith("https://www.facebook.com/api/graphql/"):
+    if response.url.startswith("https://www.facebook.com/api/graphql/") or response.url.startswith("https://web.facebook.com/api/graphql/"):
         print(f"\n[DEBUG] GraphQL detectado: {response.url}")
         print(f"[DEBUG] Método: {response.request.method}")
         print(f"[DEBUG] Es petición válida?: {response.request.method == 'POST' and response.ok}")
@@ -481,10 +481,13 @@ async def main():
                     locale="es-ES",
                 )
                 page = await context.new_page()
-                
+
+                # Bloquear recursos innecesarios
+                await page.route("**/*", lambda route, request: route.abort() if request.resource_type in ["image", "media", "stylesheet", "font", "other"] else route.continue_())
+
                 # Configurar el manejador de respuestas antes de navegar
                 page.on("response", lambda response: asyncio.create_task(response_handler(response)))
-                
+
                 print(f"INFO: Navegando a: {TARGET_URL}")
                 try:
                     await page.goto(TARGET_URL, wait_until="networkidle", timeout=90000)
