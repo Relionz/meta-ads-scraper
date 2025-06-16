@@ -13,6 +13,7 @@ checkpoints/
 fb_ad_library_profile_v4/
 *.json
 *.pkl
+*.har
 
 # Operating System
 .DS_Store
