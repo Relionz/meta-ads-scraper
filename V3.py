@@ -24,13 +24,20 @@ class FacebookAdsLibraryScraper:
         except:
             return url
     
-    def get_media_info(self, cards):
-        """Extrae información de medios (imagen/video) de las cards"""
+    def get_media_info(self, snapshot):
+        """
+        Extrae información de medios (imagen/video) del snapshot.
+        Intenta primero desde 'cards' y, si no encuentra video, usa 'videos' como fallback.
+        """
         video_hd_url = ""
         video_sd_url = ""
         image_url = ""
         thumbnail_url = ""
-        
+
+        cards = snapshot.get('cards', [])
+        videos = snapshot.get('videos', [])
+
+        # 1. Intento principal: a través de 'cards'
         if cards and len(cards) > 0:
             first_card = cards[0]
             video_hd_url = first_card.get('video_hd_url', '')
@@ -42,15 +49,25 @@ class FacebookAdsLibraryScraper:
             elif first_card.get('original_image_url'):
                 image_url = first_card.get('original_image_url', '')
                 
-            # Para thumbnail
+            # Para thumbnail (primera opción)
             thumbnail_url = first_card.get('video_preview_image_url', '')
             if not thumbnail_url:
                 thumbnail_url = image_url
-                
+        
+        # 2. Fallback: si no se encontró video en 'cards', buscar en 'videos'
+        if not video_hd_url and videos and len(videos) > 0:
+            first_video = videos[0]
+            video_hd_url = first_video.get('video_hd_url', '')
+            video_sd_url = first_video.get('video_sd_url', '')
+            
+            # El thumbnail también debería usar este fallback
+            thumbnail_url = first_video.get('video_preview_image_url', '')
+            
         return video_hd_url, video_sd_url, image_url, thumbnail_url
     
     def determine_ad_format(self, cards, images, videos):
         """Determina el formato del anuncio"""
+        # Primero revisa 'cards', que es la fuente más común
         if cards and len(cards) > 0:
             first_card = cards[0]
             if first_card.get('video_hd_url') or first_card.get('video_sd_url'):
@@ -58,6 +75,7 @@ class FacebookAdsLibraryScraper:
             elif first_card.get('resized_image_url') or first_card.get('original_image_url'):
                 return "IMAGEN"
         
+        # Si 'cards' no define el formato, revisa las listas 'videos' e 'images'
         if videos and len(videos) > 0:
             return "VIDEO"
         elif images and len(images) > 0:
@@ -82,14 +100,13 @@ class FacebookAdsLibraryScraper:
                 for result in collated_results:
                     try:
                         snapshot = result.get('snapshot', {})
-                        cards = snapshot.get('cards', [])
                         
-                        # Extraer información de medios
-                        video_hd_url, video_sd_url, image_url, thumbnail_url = self.get_media_info(cards)
+                        # Extraer información de medios usando la nueva lógica de fallback
+                        video_hd_url, video_sd_url, image_url, thumbnail_url = self.get_media_info(snapshot)
                         
                         # Determinar formato
                         ad_format = self.determine_ad_format(
-                            cards, 
+                            snapshot.get('cards', []), 
                             snapshot.get('images', []), 
                             snapshot.get('videos', [])
                         )
@@ -98,6 +115,7 @@ class FacebookAdsLibraryScraper:
                         caption_principal = ""
                         caption_secundario = snapshot.get('caption', '')
                         
+                        cards = snapshot.get('cards', []) # Obtener cards para el caption
                         if cards and len(cards) > 0:
                             caption_principal = cards[0].get('body', '')
                         
@@ -458,13 +476,20 @@ class FacebookAdsHARParser:
         except:
             return url
     
-    def get_media_info(self, cards):
-        """Extrae información de medios (imagen/video) de las cards"""
+    def get_media_info(self, snapshot):
+        """
+        Extrae información de medios (imagen/video) del snapshot.
+        Intenta primero desde 'cards' y, si no encuentra video, usa 'videos' como fallback.
+        """
         video_hd_url = ""
         video_sd_url = ""
         image_url = ""
         thumbnail_url = ""
-        
+
+        cards = snapshot.get('cards', [])
+        videos = snapshot.get('videos', [])
+
+        # 1. Intento principal: a través de 'cards'
         if cards and len(cards) > 0:
             first_card = cards[0]
             video_hd_url = first_card.get('video_hd_url', '')
@@ -476,15 +501,25 @@ class FacebookAdsHARParser:
             elif first_card.get('original_image_url'):
                 image_url = first_card.get('original_image_url', '')
                 
-            # Para thumbnail
+            # Para thumbnail (primera opción)
             thumbnail_url = first_card.get('video_preview_image_url', '')
             if not thumbnail_url:
                 thumbnail_url = image_url
-                
+        
+        # 2. Fallback: si no se encontró video en 'cards', buscar en 'videos'
+        if not video_hd_url and videos and len(videos) > 0:
+            first_video = videos[0]
+            video_hd_url = first_video.get('video_hd_url', '')
+            video_sd_url = first_video.get('video_sd_url', '')
+            
+            # El thumbnail también debería usar este fallback
+            thumbnail_url = first_video.get('video_preview_image_url', '')
+            
         return video_hd_url, video_sd_url, image_url, thumbnail_url
     
     def determine_ad_format(self, cards, images, videos):
         """Determina el formato del anuncio"""
+        # Primero revisa 'cards', que es la fuente más común
         if cards and len(cards) > 0:
             first_card = cards[0]
             if first_card.get('video_hd_url') or first_card.get('video_sd_url'):
@@ -492,6 +527,7 @@ class FacebookAdsHARParser:
             elif first_card.get('resized_image_url') or first_card.get('original_image_url'):
                 return "IMAGEN"
         
+        # Si 'cards' no define el formato, revisa las listas 'videos' e 'images'
         if videos and len(videos) > 0:
             return "VIDEO"
         elif images and len(images) > 0:
@@ -516,14 +552,13 @@ class FacebookAdsHARParser:
                 for result in collated_results:
                     try:
                         snapshot = result.get('snapshot', {})
-                        cards = snapshot.get('cards', [])
                         
-                        # Extraer información de medios
-                        video_hd_url, video_sd_url, image_url, thumbnail_url = self.get_media_info(cards)
+                        # Extraer información de medios usando la nueva lógica de fallback
+                        video_hd_url, video_sd_url, image_url, thumbnail_url = self.get_media_info(snapshot)
                         
                         # Determinar formato
                         ad_format = self.determine_ad_format(
-                            cards, 
+                            snapshot.get('cards', []), 
                             snapshot.get('images', []), 
                             snapshot.get('videos', [])
                         )
@@ -532,6 +567,7 @@ class FacebookAdsHARParser:
                         caption_principal = ""
                         caption_secundario = snapshot.get('caption', '')
                         
+                        cards = snapshot.get('cards', []) # Obtener cards para el caption
                         if cards and len(cards) > 0:
                             caption_principal = cards[0].get('body', '')
                         
@@ -709,16 +745,10 @@ async def main():
                 print(scraper.get_summary())
                 
                 # Guardar datos
-                output_file = input("\n💾 Nombre del archivo de salida (default: facebook_ads_data.json): ").strip()
-                if not output_file:
-                    output_file = 'facebook_ads_data.json'
-                
-                if scraper.save_to_json(output_file):
-                    print(f"\n✅ Proceso completado exitosamente!")
-                    print(f"📄 Archivo guardado: {output_file}")
-                    print(f"📊 Total de anuncios extraídos: {len(scraper.ads_data)}")
-                else:
-                    print("❌ Error al guardar el archivo")
+                # El guardado ya se hace progresivamente, esta parte puede omitirse o usarse como guardado final
+                print(f"\n✅ Proceso completado exitosamente!")
+                print(f"📊 Total de anuncios extraídos: {len(scraper.ads_data)}")
+
             else:
                 print("⚠️ No se encontraron anuncios. Verifica que la URL sea correcta y contenga anuncios.")
                 
